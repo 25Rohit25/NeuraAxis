@@ -1,0 +1,720 @@
+// ============================================================================
+// NEURAXIS - Prisma Schema for HIPAA-Compliant Medical Diagnosis Platform
+// ============================================================================
+//
+// This Prisma schema maps to the PostgreSQL database with HIPAA compliance.
+// Note: Column-level encryption is handled at the application layer, not Prisma.
+//
+// Usage:
+//   npx prisma generate    # Generate Prisma Client
+//   npx prisma db push     # Push schema to database
+//   npx prisma migrate     # Create and apply migrations
+// ============================================================================
+
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../node_modules/.prisma/client"
+  previewFeatures = ["multiSchema", "postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  schemas    = ["neuraxis", "public"]
+  extensions = [uuid_ossp(map: "uuid-ossp", schema: "public"), pgcrypto(schema: "public"), pg_trgm(schema: "public")]
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+enum UserRole {
+  super_admin
+  admin
+  doctor
+  nurse
+  radiologist
+  technician
+  patient
+
+  @@schema("neuraxis")
+}
+
+enum UserStatus {
+  active
+  inactive
+  suspended
+  pending_verification
+
+  @@schema("neuraxis")
+}
+
+enum CaseStatus {
+  draft
+  pending_review
+  in_progress
+  awaiting_results
+  completed
+  closed
+  archived
+
+  @@schema("neuraxis")
+}
+
+enum CasePriority {
+  routine
+  urgent
+  emergent
+  critical
+
+  @@schema("neuraxis")
+}
+
+enum DiagnosisStatus {
+  pending
+  generated
+  under_review
+  confirmed
+  rejected
+  superseded
+
+  @@schema("neuraxis")
+}
+
+enum DiagnosisSeverity {
+  minimal
+  mild
+  moderate
+  severe
+  critical
+  life_threatening
+
+  @@schema("neuraxis")
+}
+
+enum ImageType {
+  xray
+  ct_scan
+  mri
+  ultrasound
+  mammogram
+  pet_scan
+  fluoroscopy
+  dexa_scan
+  echocardiogram
+  other
+
+  @@schema("neuraxis")
+}
+
+enum ImageStatus {
+  uploading
+  uploaded
+  processing
+  analyzed
+  failed
+  archived
+
+  @@schema("neuraxis")
+}
+
+enum TreatmentStatus {
+  draft
+  active
+  on_hold
+  completed
+  discontinued
+  modified
+
+  @@schema("neuraxis")
+}
+
+enum AuditAction {
+  create
+  read
+  update
+  delete
+  login
+  logout
+  export
+  print
+  share
+  access_denied
+
+  @@schema("neuraxis")
+}
+
+// ============================================================================
+// MODELS
+// ============================================================================
+
+/// Healthcare organizations/facilities - multi-tenant support
+model Organization {
+  id        String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  name      String   @db.VarChar(255)
+  legalName String?  @map("legal_name") @db.VarChar(255)
+  type      String   @db.VarChar(50)
+  
+  // Contact Information
+  email   String  @unique @db.VarChar(255)
+  phone   String? @db.VarChar(50)
+  fax     String? @db.VarChar(50)
+  website String? @db.VarChar(255)
+  
+  // Address
+  addressLine1 String? @map("address_line1") @db.VarChar(255)
+  addressLine2 String? @map("address_line2") @db.VarChar(255)
+  city         String? @db.VarChar(100)
+  state        String? @db.VarChar(100)
+  postalCode   String? @map("postal_code") @db.VarChar(20)
+  country      String? @default("USA") @db.VarChar(100)
+  
+  // Compliance
+  npiNumber          String?   @map("npi_number") @db.VarChar(20)
+  taxId              String?   @map("tax_id") @db.VarChar(20)
+  hipaaComplianceDate DateTime? @map("hipaa_compliance_date") @db.Date
+  
+  // Settings (JSONB)
+  settings Json @default("{}")
+  
+  // Status
+  isActive Boolean @default(true) @map("is_active")
+  
+  // Timestamps
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz
+  
+  // Relations
+  users          User[]
+  patients       Patient[]
+  medicalCases   MedicalCase[]
+  diagnoses      Diagnosis[]
+  medicalImages  MedicalImage[]
+  treatmentPlans TreatmentPlan[]
+  auditLogs      AuditLog[]
+
+  @@index([isActive], name: "idx_organizations_is_active")
+  @@map("organizations")
+  @@schema("neuraxis")
+}
+
+/// System users including medical staff and patient portal accounts
+model User {
+  id             String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  
+  // Authentication
+  email        String     @unique @db.VarChar(255)
+  passwordHash String     @map("password_hash") @db.VarChar(255)
+  
+  // Profile
+  firstName String @map("first_name") @db.VarChar(100)
+  lastName  String @map("last_name") @db.VarChar(100)
+  
+  // Role & Status
+  role   UserRole
+  status UserStatus @default(pending_verification)
+  
+  // Professional Information
+  title          String?   @db.VarChar(100)
+  specialization String?   @db.VarChar(255)
+  licenseNumber  String?   @map("license_number") @db.VarChar(100)
+  licenseState   String?   @map("license_state") @db.VarChar(50)
+  licenseExpiry  DateTime? @map("license_expiry") @db.Date
+  npiNumber      String?   @map("npi_number") @db.VarChar(20)
+  deaNumber      String?   @map("dea_number") @db.VarChar(20)
+  
+  // Contact
+  phone          String? @db.VarChar(50)
+  phoneExtension String? @map("phone_extension") @db.VarChar(20)
+  
+  // Security
+  mfaEnabled           Boolean   @default(false) @map("mfa_enabled")
+  mfaSecretEncrypted   Bytes?    @map("mfa_secret_encrypted")
+  lastLoginAt          DateTime? @map("last_login_at") @db.Timestamptz
+  lastLoginIp          String?   @map("last_login_ip") @db.Inet
+  failedLoginAttempts  Int       @default(0) @map("failed_login_attempts")
+  lockedUntil          DateTime? @map("locked_until") @db.Timestamptz
+  passwordChangedAt    DateTime? @map("password_changed_at") @db.Timestamptz
+  mustChangePassword   Boolean   @default(true) @map("must_change_password")
+  
+  // Preferences (JSONB)
+  preferences Json @default("{}")
+  
+  // Timestamps
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz
+  
+  // Relations
+  organization         Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  patient              Patient?        @relation("UserPatient")
+  primaryPatients      Patient[]       @relation("PrimaryPhysician")
+  assignedCases        MedicalCase[]   @relation("AssignedPhysician")
+  createdCases         MedicalCase[]   @relation("CreatedBy")
+  reviewedDiagnoses    Diagnosis[]     @relation("ReviewedBy")
+  reportedImages       MedicalImage[]  @relation("ReportedBy")
+  uploadedImages       MedicalImage[]  @relation("UploadedBy")
+  createdTreatments    TreatmentPlan[] @relation("TreatmentCreatedBy")
+  approvedTreatments   TreatmentPlan[] @relation("TreatmentApprovedBy")
+  auditLogs            AuditLog[]
+
+  @@index([organizationId], name: "idx_users_organization_id")
+  @@index([email], name: "idx_users_email")
+  @@index([role], name: "idx_users_role")
+  @@index([status], name: "idx_users_status")
+  @@index([organizationId, role], name: "idx_users_org_role")
+  @@map("users")
+  @@schema("neuraxis")
+}
+
+/// Patient records with encrypted PHI - HIPAA compliant
+/// Note: Encrypted fields store AES-256-GCM encrypted data as bytes.
+/// Decryption must happen at the application layer.
+model Patient {
+  id             String @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  userId         String? @unique @map("user_id") @db.Uuid
+  
+  // Medical Record Number (org-unique)
+  mrn String @db.VarChar(50)
+  
+  // =========================================================================
+  // ENCRYPTED PHI FIELDS
+  // These store AES-256-GCM encrypted data - decrypt at application layer
+  // =========================================================================
+  firstNameEncrypted       Bytes  @map("first_name_encrypted")
+  lastNameEncrypted        Bytes  @map("last_name_encrypted")
+  dateOfBirthEncrypted     Bytes  @map("date_of_birth_encrypted")
+  ssnEncrypted             Bytes? @map("ssn_encrypted")
+  emailEncrypted           Bytes? @map("email_encrypted")
+  phoneEncrypted           Bytes? @map("phone_encrypted")
+  addressEncrypted         Bytes? @map("address_encrypted")
+  emergencyContactEncrypted Bytes? @map("emergency_contact_encrypted")
+  insuranceEncrypted       Bytes? @map("insurance_encrypted")
+  
+  // Non-encrypted data
+  gender   String? @db.VarChar(20)
+  bloodType String? @map("blood_type") @db.VarChar(5)
+  
+  // Medical History (JSONB)
+  allergies          Json @default("[]")
+  chronicConditions  Json @default("[]") @map("chronic_conditions")
+  currentMedications Json @default("[]") @map("current_medications")
+  surgicalHistory    Json @default("[]") @map("surgical_history")
+  familyHistory      Json @default("{}")  @map("family_history")
+  vitals             Json @default("{}")
+  
+  // Preferences
+  preferredLanguage  String? @default("en") @map("preferred_language") @db.VarChar(10)
+  preferredPharmacy  Json?   @map("preferred_pharmacy")
+  
+  // Care Team
+  primaryPhysicianId String? @map("primary_physician_id") @db.Uuid
+  careTeam           Json    @default("[]") @map("care_team")
+  
+  // Status
+  isActive Boolean @default(true) @map("is_active")
+  
+  // Timestamps
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz
+  
+  // Relations
+  organization     Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  user             User?           @relation("UserPatient", fields: [userId], references: [id], onDelete: SetNull)
+  primaryPhysician User?           @relation("PrimaryPhysician", fields: [primaryPhysicianId], references: [id])
+  medicalCases     MedicalCase[]
+  diagnoses        Diagnosis[]
+  medicalImages    MedicalImage[]
+  treatmentPlans   TreatmentPlan[]
+
+  @@unique([organizationId, mrn], name: "patient_mrn_org_unique")
+  @@index([organizationId], name: "idx_patients_organization_id")
+  @@index([organizationId, mrn], name: "idx_patients_mrn")
+  @@index([isActive], name: "idx_patients_is_active")
+  @@map("patients")
+  @@schema("neuraxis")
+}
+
+/// Patient medical cases with SOAP notes and workflow
+model MedicalCase {
+  id             String @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  patientId      String @map("patient_id") @db.Uuid
+  
+  // Case Identification
+  caseNumber String @map("case_number") @db.VarChar(50)
+  
+  // Case Details
+  title          String  @db.VarChar(255)
+  description    String? @db.Text
+  chiefComplaint String? @map("chief_complaint") @db.Text
+  
+  // Classification
+  caseType   String?      @map("case_type") @db.VarChar(100)
+  specialty  String?      @db.VarChar(100)
+  priority   CasePriority @default(routine)
+  status     CaseStatus   @default(draft)
+  
+  // Assignment
+  assignedPhysicianId String? @map("assigned_physician_id") @db.Uuid
+  createdById         String  @map("created_by_id") @db.Uuid
+  
+  // Dates
+  admissionDate DateTime? @map("admission_date") @db.Date
+  dischargeDate DateTime? @map("discharge_date") @db.Date
+  scheduledDate DateTime? @map("scheduled_date") @db.Timestamptz
+  
+  // SOAP Notes (JSONB)
+  subjective Json @default("{}")
+  objective  Json @default("{}")
+  assessment Json @default("{}")
+  plan       Json @default("{}")
+  
+  // Additional Data
+  metadata Json     @default("{}")
+  tags     String[] @db.Text
+  icdCodes String[] @map("icd_codes") @db.Text
+  
+  // Timestamps
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  closedAt  DateTime? @map("closed_at") @db.Timestamptz
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz
+  
+  // Relations
+  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  patient           Patient         @relation(fields: [patientId], references: [id], onDelete: Restrict)
+  assignedPhysician User?           @relation("AssignedPhysician", fields: [assignedPhysicianId], references: [id])
+  createdBy         User            @relation("CreatedBy", fields: [createdById], references: [id])
+  diagnoses         Diagnosis[]
+  medicalImages     MedicalImage[]
+  treatmentPlans    TreatmentPlan[]
+
+  @@unique([organizationId, caseNumber], name: "case_number_org_unique")
+  @@index([organizationId], name: "idx_cases_organization_id")
+  @@index([patientId], name: "idx_cases_patient_id")
+  @@index([status], name: "idx_cases_status")
+  @@index([priority], name: "idx_cases_priority")
+  @@index([organizationId, status], name: "idx_cases_org_status")
+  @@map("medical_cases")
+  @@schema("neuraxis")
+}
+
+/// AI-generated and physician-confirmed diagnoses
+model Diagnosis {
+  id             String @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  caseId         String @map("case_id") @db.Uuid
+  patientId      String @map("patient_id") @db.Uuid
+  
+  // Source
+  isAiGenerated   Boolean @default(true) @map("is_ai_generated")
+  aiModelVersion  String? @map("ai_model_version") @db.VarChar(100)
+  aiModelName     String? @map("ai_model_name") @db.VarChar(255)
+  
+  // Primary Diagnosis
+  primaryDiagnosis String  @map("primary_diagnosis") @db.VarChar(500)
+  icdCode          String? @map("icd_code") @db.VarChar(20)
+  snomedCode       String? @map("snomed_code") @db.VarChar(50)
+  
+  // Confidence & Severity
+  confidenceScore Decimal?          @map("confidence_score") @db.Decimal(5, 4)
+  severity        DiagnosisSeverity?
+  
+  // AI Reasoning
+  reasoning           String? @db.Text
+  supportingEvidence  Json    @default("[]") @map("supporting_evidence")
+  differentialDiagnoses Json  @default("[]") @map("differential_diagnoses")
+  
+  // Risk Assessment
+  riskFactors       Json @default("[]") @map("risk_factors")
+  contraindications Json @default("[]")
+  
+  // Recommendations
+  recommendedTests      Json @default("[]") @map("recommended_tests")
+  recommendedTreatments Json @default("[]") @map("recommended_treatments")
+  
+  // Status & Review
+  status       DiagnosisStatus @default(pending)
+  reviewedById String?         @map("reviewed_by_id") @db.Uuid
+  reviewedAt   DateTime?       @map("reviewed_at") @db.Timestamptz
+  reviewNotes  String?         @map("review_notes") @db.Text
+  
+  // Final Diagnosis (after physician review)
+  finalDiagnosis String? @map("final_diagnosis") @db.VarChar(500)
+  finalIcdCode   String? @map("final_icd_code") @db.VarChar(20)
+  
+  // Analytics
+  processingTimeMs Int?    @map("processing_time_ms")
+  inputDataHash    String? @map("input_data_hash") @db.VarChar(64)
+  
+  // Timestamps
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz
+  
+  // Relations
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  case           MedicalCase     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  patient        Patient         @relation(fields: [patientId], references: [id], onDelete: Restrict)
+  reviewedBy     User?           @relation("ReviewedBy", fields: [reviewedById], references: [id])
+  treatmentPlans TreatmentPlan[]
+
+  @@index([organizationId], name: "idx_diagnoses_organization_id")
+  @@index([caseId], name: "idx_diagnoses_case_id")
+  @@index([patientId], name: "idx_diagnoses_patient_id")
+  @@index([status], name: "idx_diagnoses_status")
+  @@index([icdCode], name: "idx_diagnoses_icd_code")
+  @@map("diagnoses")
+  @@schema("neuraxis")
+}
+
+/// Medical imaging metadata - actual files in secure object storage
+model MedicalImage {
+  id             String @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  caseId         String? @map("case_id") @db.Uuid
+  patientId      String @map("patient_id") @db.Uuid
+  
+  // Image Identification
+  accessionNumber String? @map("accession_number") @db.VarChar(100)
+  
+  // Image Type & Details
+  imageType    ImageType
+  bodyRegion   String?   @map("body_region") @db.VarChar(100)
+  laterality   String?   @db.VarChar(20)
+  viewPosition String?   @map("view_position") @db.VarChar(50)
+  
+  // DICOM Metadata
+  dicomMetadata      Json    @default("{}") @map("dicom_metadata")
+  studyInstanceUid   String? @map("study_instance_uid") @db.VarChar(255)
+  seriesInstanceUid  String? @map("series_instance_uid") @db.VarChar(255)
+  sopInstanceUid     String? @map("sop_instance_uid") @db.VarChar(255)
+  
+  // Storage
+  storageProvider String? @default("S3") @map("storage_provider") @db.VarChar(50)
+  storageBucket   String? @map("storage_bucket") @db.VarChar(255)
+  storageKey      String? @map("storage_key") @db.VarChar(500)
+  storageUrl      String? @map("storage_url") @db.Text
+  thumbnailKey    String? @map("thumbnail_key") @db.VarChar(500)
+  thumbnailUrl    String? @map("thumbnail_url") @db.Text
+  
+  // File Details
+  fileName        String?  @map("file_name") @db.VarChar(255)
+  fileSizeBytes   BigInt?  @map("file_size_bytes")
+  mimeType        String?  @map("mime_type") @db.VarChar(100)
+  checksumSha256  String?  @map("checksum_sha256") @db.VarChar(64)
+  
+  // Processing Status
+  status ImageStatus @default(uploading)
+  
+  // AI Analysis
+  aiAnalysis      Json      @default("{}") @map("ai_analysis")
+  aiAnalyzedAt    DateTime? @map("ai_analyzed_at") @db.Timestamptz
+  aiModelVersion  String?   @map("ai_model_version") @db.VarChar(100)
+  
+  // Clinical Notes
+  radiologistNotes String? @map("radiologist_notes") @db.Text
+  findings         String? @db.Text
+  impression       String? @db.Text
+  
+  // Reported
+  reportedById String?   @map("reported_by_id") @db.Uuid
+  reportedAt   DateTime? @map("reported_at") @db.Timestamptz
+  uploadedById String?   @map("uploaded_by_id") @db.Uuid
+  
+  // Dates
+  studyDate DateTime? @map("study_date") @db.Timestamptz
+  
+  // Timestamps
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz
+  
+  // Relations
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  case         MedicalCase? @relation(fields: [caseId], references: [id], onDelete: SetNull)
+  patient      Patient      @relation(fields: [patientId], references: [id], onDelete: Restrict)
+  reportedBy   User?        @relation("ReportedBy", fields: [reportedById], references: [id])
+  uploadedBy   User?        @relation("UploadedBy", fields: [uploadedById], references: [id])
+
+  @@index([organizationId], name: "idx_images_organization_id")
+  @@index([caseId], name: "idx_images_case_id")
+  @@index([patientId], name: "idx_images_patient_id")
+  @@index([imageType], name: "idx_images_type")
+  @@index([status], name: "idx_images_status")
+  @@map("medical_images")
+  @@schema("neuraxis")
+}
+
+/// Drug catalog with comprehensive interaction and safety data
+model Medication {
+  id String @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  
+  // Drug Identification
+  ndcCode String? @unique @map("ndc_code") @db.VarChar(20)
+  rxcui   String? @db.VarChar(20)
+  
+  // Names
+  genericName String   @map("generic_name") @db.VarChar(255)
+  brandNames  String[] @map("brand_names") @db.Text
+  
+  // Classification
+  drugClass           String? @map("drug_class") @db.VarChar(255)
+  therapeuticClass    String? @map("therapeutic_class") @db.VarChar(255)
+  pharmacologicalClass String? @map("pharmacological_class") @db.VarChar(255)
+  
+  // Formulation
+  dosageForm String? @map("dosage_form") @db.VarChar(100)
+  strength   String? @db.VarChar(100)
+  route      String? @db.VarChar(100)
+  
+  // Details
+  description       String? @db.Text
+  indications       Json    @default("[]")
+  contraindications Json    @default("[]")
+  warnings          Json    @default("[]")
+  interactions      Json    @default("[]")
+  sideEffects       Json    @default("[]") @map("side_effects")
+  dosingGuidelines  Json    @default("{}") @map("dosing_guidelines")
+  
+  // Regulatory
+  schedule             String?  @db.VarChar(10)
+  requiresPrescription Boolean  @default(true) @map("requires_prescription")
+  isActive             Boolean  @default(true) @map("is_active")
+  fdaApprovalDate      DateTime? @map("fda_approval_date") @db.Date
+  
+  // Timestamps
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([genericName], name: "idx_medications_generic_name")
+  @@index([ndcCode], name: "idx_medications_ndc")
+  @@index([drugClass], name: "idx_medications_drug_class")
+  @@map("medications")
+  @@schema("neuraxis")
+}
+
+/// Comprehensive treatment plans with medications, procedures, and follow-ups
+model TreatmentPlan {
+  id             String @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  caseId         String @map("case_id") @db.Uuid
+  patientId      String @map("patient_id") @db.Uuid
+  diagnosisId    String? @map("diagnosis_id") @db.Uuid
+  
+  // Plan Details
+  title       String  @db.VarChar(255)
+  description String? @db.Text
+  status      TreatmentStatus @default(draft)
+  
+  // Orders (JSONB arrays)
+  medications    Json @default("[]")
+  procedures     Json @default("[]")
+  labOrders      Json @default("[]") @map("lab_orders")
+  imagingOrders  Json @default("[]") @map("imaging_orders")
+  referrals      Json @default("[]")
+  followUps      Json @default("[]") @map("follow_ups")
+  
+  // Patient Instructions
+  patientInstructions  String? @map("patient_instructions") @db.Text
+  dietaryRestrictions  String? @map("dietary_restrictions") @db.Text
+  activityRestrictions String? @map("activity_restrictions") @db.Text
+  
+  // Goals & Outcomes
+  treatmentGoals   Json @default("[]") @map("treatment_goals")
+  expectedOutcomes Json @default("{}") @map("expected_outcomes")
+  
+  // Care Team
+  createdById   String    @map("created_by_id") @db.Uuid
+  approvedById  String?   @map("approved_by_id") @db.Uuid
+  approvedAt    DateTime? @map("approved_at") @db.Timestamptz
+  
+  // Duration
+  startDate       DateTime? @map("start_date") @db.Date
+  expectedEndDate DateTime? @map("expected_end_date") @db.Date
+  actualEndDate   DateTime? @map("actual_end_date") @db.Date
+  
+  // Notes
+  clinicalNotes String? @map("clinical_notes") @db.Text
+  
+  // Timestamps
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz
+  
+  // Relations
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  case         MedicalCase  @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  patient      Patient      @relation(fields: [patientId], references: [id], onDelete: Restrict)
+  diagnosis    Diagnosis?   @relation(fields: [diagnosisId], references: [id], onDelete: SetNull)
+  createdBy    User         @relation("TreatmentCreatedBy", fields: [createdById], references: [id])
+  approvedBy   User?        @relation("TreatmentApprovedBy", fields: [approvedById], references: [id])
+
+  @@index([organizationId], name: "idx_treatment_plans_organization_id")
+  @@index([caseId], name: "idx_treatment_plans_case_id")
+  @@index([patientId], name: "idx_treatment_plans_patient_id")
+  @@index([status], name: "idx_treatment_plans_status")
+  @@map("treatment_plans")
+  @@schema("neuraxis")
+}
+
+/// Immutable audit trail for HIPAA compliance - NO updates or deletes allowed
+model AuditLog {
+  id String @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  
+  // Actor
+  userId         String?   @map("user_id") @db.Uuid
+  userEmail      String?   @map("user_email") @db.VarChar(255)
+  userRole       UserRole? @map("user_role")
+  organizationId String?   @map("organization_id") @db.Uuid
+  
+  // Action
+  action AuditAction
+  
+  // Target Resource
+  resourceType        String  @map("resource_type") @db.VarChar(100)
+  resourceId          String? @map("resource_id") @db.Uuid
+  resourceDescription String? @map("resource_description") @db.VarChar(500)
+  
+  // Change Details
+  changes Json @default("{}")
+  
+  // Request Context
+  ipAddress String? @map("ip_address") @db.Inet
+  userAgent String? @map("user_agent") @db.Text
+  requestId String? @map("request_id") @db.Uuid
+  sessionId String? @map("session_id") @db.Uuid
+  
+  // API Details
+  endpoint        String? @db.VarChar(500)
+  httpMethod      String? @map("http_method") @db.VarChar(10)
+  requestBodyHash String? @map("request_body_hash") @db.VarChar(64)
+  
+  // Result
+  success      Boolean @default(true)
+  errorMessage String? @map("error_message") @db.Text
+  
+  // PHI Access Flag
+  accessedPhi      Boolean  @default(false) @map("accessed_phi")
+  phiFieldsAccessed String[] @map("phi_fields_accessed") @db.Text
+  
+  // Timestamp (immutable - no updated_at!)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  
+  // Relations
+  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  @@index([userId], name: "idx_audit_user_id")
+  @@index([organizationId], name: "idx_audit_organization_id")
+  @@index([action], name: "idx_audit_action")
+  @@index([resourceType, resourceId], name: "idx_audit_resource")
+  @@index([accessedPhi], name: "idx_audit_accessed_phi")
+  @@map("audit_logs")
+  @@schema("neuraxis")
+}
